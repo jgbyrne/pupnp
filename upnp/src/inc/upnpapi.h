@@ -280,6 +280,7 @@ typedef enum {
 
 #define E_HTTP_SYNTAX -6
 
+int UpnpGetIfAddrInfo(const char *IfName, const char *IpAddr);
 
 /*!
  * \brief Retrieve interface information and keep it in global variables.

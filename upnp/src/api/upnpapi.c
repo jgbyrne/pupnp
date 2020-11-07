@@ -534,6 +534,59 @@ exit_function:
 	return retVal;
 }
 
+int UpnpInit3(const char *IfName, const char *IpAddr, unsigned short DestPort)
+{
+	int retVal;
+
+	/* Initializes the ithread library */
+	ithread_initialize_library();
+
+	ithread_mutex_lock(&gSDKInitMutex);
+
+	/* Check if we're already initialized. */
+	if (UpnpSdkInit == 1) {
+		retVal = UPNP_E_INIT;
+		goto exit_function;
+	}
+
+	/* Perform initialization preamble. */
+	retVal = UpnpInitPreamble();
+	if (retVal != UPNP_E_SUCCESS) {
+		goto exit_function;
+	}
+
+	UpnpPrintf(UPNP_INFO,
+		API,
+		__FILE__,
+		__LINE__,
+		"UpnpInit3 with IfName=%s, IpAddr=%s, DestPort=%d.\n",
+		IfName ? IfName : "NULL",
+		IpAddr ? IpAddr : "NULL",
+		DestPort);
+
+	/* Retrieve interface information (Addresses, index, etc). */
+	retVal = UpnpGetIfInfo(IfName);
+	if (retVal != UPNP_E_SUCCESS) {
+		goto exit_function;
+	}
+
+	/* Set the UpnpSdkInit flag to 1 to indicate we're successfully
+	 * initialized. */
+	UpnpSdkInit = 1;
+
+	/* Finish initializing the SDK. */
+	retVal = UpnpInitStartServers(DestPort);
+	if (retVal != UPNP_E_SUCCESS) {
+		UpnpSdkInit = 0;
+		goto exit_function;
+	}
+
+exit_function:
+	ithread_mutex_unlock(&gSDKInitMutex);
+
+	return retVal;
+}
+
 #ifdef UPNP_ENABLE_OPEN_SSL
 int UpnpInitSslContext(int initOpenSslLib, const SSL_METHOD *sslMethod)
 {
@@ -3569,8 +3622,25 @@ static unsigned UpnpComputeIpv6PrefixLength(struct sockaddr_in6 *Netmask)
 }
 #endif
 
-int UpnpGetIfInfo(const char *IfName)
+int UpnpGetIfAddrInfo(const char *IfName, const char *IpAddr)
 {
+	int wants_addr = 0; /* 0 = none, 4 = IPv4, 6 = IPv6 */ 
+	struct in_addr v4_wanted;
+	struct in6_addr v6_wanted;
+	if (IpAddr != NULL) {
+		if (inet_pton(AF_INET, IpAddr, (void*) &v4_wanted)) {
+			wants_addr = 4;
+		} else {
+			if (inet_pton(AF_INET, IpAddr, (void*) &v6_wanted)) {
+		    		wants_addr = 6; 
+			}
+		}
+		if (!wants_addr) {
+			/* Could not understand provided IpAddr */
+			return UPNP_E_INVALID_PARAM;
+		}
+	}
+
 #ifdef _WIN32
 	/* ---------------------------------------------------- */
 	/* WIN32 implementation will use the IpHlpAPI library.  */
@@ -3675,16 +3745,33 @@ int UpnpGetIfInfo(const char *IfName)
 		uni_addr = adapts_item->FirstUnicastAddress;
 		while (uni_addr) {
 			ip_addr = uni_addr->Address.lpSockaddr;
+
 			switch (ip_addr->sa_family) {
 			case AF_INET:
+				if (wants_addr == 6) {
+				    break;
+				}
+				
 				memcpy(&v4_addr,
 					&((struct sockaddr_in *)ip_addr)
 						 ->sin_addr,
 					sizeof(v4_addr));
 				/* TODO: Retrieve IPv4 netmask */
+
+				if (wants_addr == 4 &&
+				    memcmp(&v4_addr,
+				           &v4_wanted,
+					   sizeof(v4_addr))) {
+					break;
+				}
+
 				valid_addr_found = 1;
 				break;
 			case AF_INET6:
+				if (wants_addr == 4) {
+				    break;
+				}
+
 				/* TODO: Retrieve IPv6 ULA or GUA address and
 				 * its prefix */
 				/* Only keep IPv6 link-local addresses. */
@@ -3696,6 +3783,14 @@ int UpnpGetIfInfo(const char *IfName)
 								ip_addr)
 							 ->sin6_addr,
 						sizeof(v6_addr));
+
+					if (wants_addr == 6 &&
+					    memcmp(&v6_addr,
+						   &v6_wanted,
+						   sizeof(v6_addr))) {
+						break;
+					}
+
 					/* TODO: Retrieve IPv6 LLA prefix */
 					valid_addr_found = 1;
 				}
@@ -3788,6 +3883,10 @@ int UpnpGetIfInfo(const char *IfName)
 		/* Keep interface addresses for later. */
 		switch (ifa->ifa_addr->sa_family) {
 		case AF_INET:
+			if (wants_addr == 6) {
+			    break;
+			}
+
 			memcpy(&v4_addr,
 				&((struct sockaddr_in *)(ifa->ifa_addr))
 					 ->sin_addr,
@@ -3796,9 +3895,21 @@ int UpnpGetIfInfo(const char *IfName)
 				&((struct sockaddr_in *)(ifa->ifa_netmask))
 					 ->sin_addr,
 				sizeof(v4_netmask));
+
+			if (wants_addr == 4 &&
+			    memcmp(&v4_addr,
+				   &v4_wanted,
+				   sizeof(v4_addr))) {
+				break;
+			}
+
 			valid_addr_found = 1;
 			break;
 		case AF_INET6:
+			if (wants_addr == 4) {
+			    break;
+			}
+
 			if (IN6_IS_ADDR_ULA(
 				    &((struct sockaddr_in6 *)(ifa->ifa_addr))
 					     ->sin6_addr)) {
@@ -3840,6 +3951,14 @@ int UpnpGetIfInfo(const char *IfName)
 				v6_prefix = UpnpComputeIpv6PrefixLength(
 					(struct sockaddr_in6
 							*)(ifa->ifa_netmask));
+
+				if (wants_addr == 6 &&
+				    memcmp(&v6_addr,
+					   &v6_wanted,
+					   sizeof(v6_addr))) {
+					break;
+				}
+
 				valid_addr_found = 1;
 			}
 			break;
@@ -3975,15 +4094,29 @@ int UpnpGetIfInfo(const char *IfName)
 		}
 		/* Check address family. */
 		if (pifReq->ifr_addr.sa_family == AF_INET) {
+			if (wants_addr == 6) {
+				break;
+			}
+			
 			/* Copy interface name, IPv4 address, IPv4 netmask and
 			 * interface index. */
 			memset(gIF_NAME, 0, sizeof(gIF_NAME));
 			strncpy(gIF_NAME,
 				pifReq->ifr_name,
 				sizeof(gIF_NAME) - 1);
-			inet_ntop(AF_INET,
+			struct in_addr v4_addr;
+			memcpy(&v4_addr,
 				&((struct sockaddr_in *)&pifReq->ifr_addr)
 					 ->sin_addr,
+				sizeof(v4_addr));
+			if (wants_addr == 4 &&
+			    memcmp(&v4_addr,
+				   &v4_wanted,
+				   sizeof(v4_addr))) {
+				continue;
+			}
+			inet_ntop(AF_INET,
+				&v4_addr,
 				gIF_IPV4,
 				sizeof(gIF_IPV4));
 			if (ioctl(LocalSock, SIOCGIFNETMASK, &ifReq) < 0) {
@@ -4022,7 +4155,7 @@ int UpnpGetIfInfo(const char *IfName)
 	/* Try to get the IPv6 address for the same interface  */
 	/* from "/proc/net/if_inet6", if possible. */
 	inet6_procfd = fopen("/proc/net/if_inet6", "r");
-	if (inet6_procfd) {
+	if (inet6_procfd && wants_addr != 4) {
 		while (fscanf(inet6_procfd,
 			       "%4s%4s%4s%4s%4s%4s%4s%4s %02x %02x %*02x "
 			       "%*02x %*20s\n",
@@ -4051,7 +4184,11 @@ int UpnpGetIfInfo(const char *IfName)
 					addr6[7]);
 				/* Validate formed address and check for
 				 * link-local. */
-				if (inet_pton(AF_INET6, buf, &v6_addr) > 0) {
+				int parse = inet_pton(AF_INET6, buf, &v6_addr) > 0;
+				int unwanted = wants_addr == 6 && memcmp(&v6_addr,
+					       			   &v6_wanted,
+							     	   sizeof(v6_addr));
+				if (parse && !unwanted) {
 					if (IN6_IS_ADDR_ULA(&v6_addr)) {
 						/* Got valid IPv6 ula. */
 						memset(gIF_IPV6_ULA_GUA,
@@ -4112,6 +4249,12 @@ int UpnpGetIfInfo(const char *IfName)
 
 	return UPNP_E_SUCCESS;
 }
+
+/* Wrapper to preserve compatibility */
+int UpnpGetIfInfo(const char *IfName) {
+	return UpnpGetIfAddrInfo(IfName, NULL);
+}
+
 
 /*!
  * \brief Schedule async functions in threadpool.

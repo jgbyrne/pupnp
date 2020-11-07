@@ -551,6 +551,11 @@ EXPORT_SPEC int UpnpInit2(
 	 * \c NULL will pick an arbitrary free port. */
 	unsigned short DestPort);
 
+int UpnpInit3(
+	const char *IfName,
+	const char *IpAddr,
+	unsigned short DestPort);
+
 /*!
  * \brief Initializes the OpenSSL library, and the OpenSSL context for use
  * with pupnp
